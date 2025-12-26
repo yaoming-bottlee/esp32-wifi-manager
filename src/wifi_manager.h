@@ -36,6 +36,14 @@ Contains the freeRTOS task and all necessary support
 #include "esp_wifi.h"
 #include "esp_netif.h"
 
+#ifndef WIFI_MANAGER_ENABLE_AP
+#if defined(CONFIG_ESP_WIFI_SOFTAP_SUPPORT) && CONFIG_ESP_WIFI_SOFTAP_SUPPORT
+#define WIFI_MANAGER_ENABLE_AP 1
+#else
+#define WIFI_MANAGER_ENABLE_AP 0
+#endif
+#endif
+
 
 #ifdef __cplusplus
 extern "C" {

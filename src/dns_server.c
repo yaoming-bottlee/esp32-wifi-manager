@@ -48,7 +48,7 @@ Contains the freeRTOS task for the DNS server that processes the requests.
 #include <lwip/sys.h>
 #include <lwip/netdb.h>
 #include <lwip/dns.h>
-#include <byteswap.h>
+#include <lwip/def.h>
 
 #include "wifi_manager.h"
 #include "dns_server.h"
@@ -158,11 +158,11 @@ void dns_server(void *pvParameters) {
 
             /* create DNS answer at the end of the query*/
             dns_answer_t *dns_answer = (dns_answer_t*)&response[length];
-            dns_answer->NAME = __bswap_16(0xC00C); /* This is a pointer to the beginning of the question. As per DNS standard, first two bits must be set to 11 for some odd reason hence 0xC0 */
-            dns_answer->TYPE = __bswap_16(DNS_ANSWER_TYPE_A);
-            dns_answer->CLASS = __bswap_16(DNS_ANSWER_CLASS_IN);
+            dns_answer->NAME = lwip_htons(0xC00C); /* This is a pointer to the beginning of the question. As per DNS standard, first two bits must be set to 11 for some odd reason hence 0xC0 */
+            dns_answer->TYPE = lwip_htons(DNS_ANSWER_TYPE_A);
+            dns_answer->CLASS = lwip_htons(DNS_ANSWER_CLASS_IN);
             dns_answer->TTL = (uint32_t)0x00000000; /* no caching. Avoids DNS poisoning since this is a DNS hijack */
-            dns_answer->RDLENGTH = __bswap_16(0x0004); /* 4 byte => size of an ipv4 address */
+            dns_answer->RDLENGTH = lwip_htons(0x0004); /* 4 byte => size of an ipv4 address */
             dns_answer->RDATA = ip_resolved.addr;
 
             err = sendto(socket_fd, response, length+sizeof(dns_answer_t), 0, (struct sockaddr *)&client, client_len);
@@ -178,7 +178,6 @@ void dns_server(void *pvParameters) {
 
     vTaskDelete ( NULL );
 }
-
 
 
 

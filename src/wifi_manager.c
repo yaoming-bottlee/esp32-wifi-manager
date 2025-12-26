@@ -670,6 +670,7 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 			ESP_LOGI(TAG, "WIFI_EVENT_STA_AUTHMODE_CHANGE");
 			break;
 
+#if WIFI_MANAGER_ENABLE_AP
 		case WIFI_EVENT_AP_START:
 			ESP_LOGI(TAG, "WIFI_EVENT_AP_START");
 			xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_AP_STARTED_BIT);
@@ -702,6 +703,7 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 		case WIFI_EVENT_AP_PROBEREQRECVED:
 			ESP_LOGI(TAG, "WIFI_EVENT_AP_PROBEREQRECVED");
 			break;
+#endif
 
 		} /* end switch */
 	}
@@ -904,7 +906,11 @@ void wifi_manager( void * pvParameters ){
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
 
 	esp_netif_sta = esp_netif_create_default_wifi_sta();
+#if WIFI_MANAGER_ENABLE_AP
 	esp_netif_ap = esp_netif_create_default_wifi_ap();
+#else
+	esp_netif_ap = NULL;
+#endif
 
 
 	/* default wifi config */
@@ -919,6 +925,7 @@ void wifi_manager( void * pvParameters ){
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, &wifi_manager_event_handler, NULL,&instance_ip_event));
 
 
+#if WIFI_MANAGER_ENABLE_AP
 	/* SoftAP - Wifi Access Point configuration setup */
 	wifi_config_t ap_config = {
 		.ap = {
@@ -940,7 +947,6 @@ void wifi_manager( void * pvParameters ){
 		ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
 		memcpy(ap_config.ap.password, wifi_settings.ap_pwd, sizeof(wifi_settings.ap_pwd));
 	}
-	
 
 	/* DHCP AP configuration */
 	esp_netif_dhcps_stop(esp_netif_ap); /* DHCP client/server must be stopped before setting new IP information. */
@@ -955,6 +961,7 @@ void wifi_manager( void * pvParameters ){
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));
 	ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, wifi_settings.ap_bandwidth));
+#endif
 	ESP_ERROR_CHECK(esp_wifi_set_ps(wifi_settings.sta_power_save));
 
 
@@ -1033,8 +1040,12 @@ void wifi_manager( void * pvParameters ){
 				}
 				else{
 					/* no wifi saved: start soft AP! This is what should happen during a first run */
+#if WIFI_MANAGER_ENABLE_AP
 					ESP_LOGI(TAG, "No saved wifi found on startup. Starting access point.");
 					wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+#else
+					ESP_LOGW(TAG, "No saved wifi found and SoftAP is disabled.");
+#endif
 				}
 
 				/* callback */
@@ -1169,7 +1180,9 @@ void wifi_manager( void * pvParameters ){
 					wifi_manager_save_sta_config();
 
 					/* start SoftAP */
+#if WIFI_MANAGER_ENABLE_AP
 					wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+#endif
 				}
 				else{
 					/* lost connection ? */
@@ -1184,6 +1197,7 @@ void wifi_manager( void * pvParameters ){
 					/* if it was a restore attempt connection, we clear the bit */
 					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
 
+#if WIFI_MANAGER_ENABLE_AP
 					/* if the AP is not started, we check if we have reached the threshold of failed attempt to start it */
 					if(! (uxBits & WIFI_MANAGER_AP_STARTED_BIT) ){
 
@@ -1200,6 +1214,7 @@ void wifi_manager( void * pvParameters ){
 							wifi_manager_send_message(WM_ORDER_START_AP, NULL);
 						}
 					}
+#endif
 				}
 
 				/* callback */
@@ -1211,6 +1226,7 @@ void wifi_manager( void * pvParameters ){
 			case WM_ORDER_START_AP:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_START_AP");
 
+#if WIFI_MANAGER_ENABLE_AP
 				ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
 				/* restart HTTP daemon */
@@ -1219,6 +1235,9 @@ void wifi_manager( void * pvParameters ){
 
 				/* start DNS */
 				dns_server_start();
+#else
+				ESP_LOGW(TAG, "SoftAP is disabled; skipping AP start.");
+#endif
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
@@ -1228,6 +1247,7 @@ void wifi_manager( void * pvParameters ){
 			case WM_ORDER_STOP_AP:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_STOP_AP");
 
+#if WIFI_MANAGER_ENABLE_AP
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 
@@ -1249,6 +1269,9 @@ void wifi_manager( void * pvParameters ){
 					/* callback */
 					if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
 				}
+#else
+				ESP_LOGW(TAG, "SoftAP is disabled; skipping AP stop.");
+#endif
 
 				break;
 
@@ -1282,6 +1305,7 @@ void wifi_manager( void * pvParameters ){
 				}
 				else { abort(); }
 
+#if WIFI_MANAGER_ENABLE_AP
 				/* bring down DNS hijack */
 				dns_server_stop();
 
@@ -1301,6 +1325,7 @@ void wifi_manager( void * pvParameters ){
 					}
 
 				}
+#endif
 
 				/* callback and free memory allocated for the void* param */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
@@ -1332,5 +1357,3 @@ void wifi_manager( void * pvParameters ){
 	vTaskDelete( NULL );
 
 }
-
-
