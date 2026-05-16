@@ -1024,7 +1024,19 @@ void wifi_manager( void * pvParameters ){
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if(! (uxBits & WIFI_MANAGER_SCAN_BIT) ){
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
-					ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, false));
+					esp_err_t scan_err = esp_wifi_scan_start(&scan_config, false);
+					if (scan_err != ESP_OK) {
+						/* Keep the manager alive when a reconnect is already in progress.
+						 * The caller can request a new scan once the Wi-Fi state settles.
+						 */
+						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
+						if (scan_err == ESP_ERR_WIFI_STATE) {
+							ESP_LOGW(TAG, "Skipping WiFi scan because the driver is busy connecting/reconfiguring");
+						}
+						else {
+							ESP_LOGE(TAG, "esp_wifi_scan_start failed: %s", esp_err_to_name(scan_err));
+						}
+					}
 				}
 
 				/* callback */
