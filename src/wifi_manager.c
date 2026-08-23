@@ -1263,10 +1263,10 @@ void wifi_manager( void * pvParameters ){
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 
-				/* before stopping the AP, we check that we are still connected. There's a chance that once the timer
-				 * kicks in, for whatever reason the esp32 is already disconnected.
+				/* Stop the AP when it is actually running. This lets console
+				 * recovery commands close the config portal even without STA IP.
 				 */
-				if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
+				if(uxBits & WIFI_MANAGER_AP_STARTED_BIT){
 
 					/* set to STA only */
 					esp_wifi_set_mode(WIFI_MODE_STA);
@@ -1325,7 +1325,7 @@ void wifi_manager( void * pvParameters ){
 				 * We check first that it's actually running because in case of a boot and restore connection
 				 * the AP is not even started to begin with.
 				 */
-				if(uxBits & WIFI_MANAGER_AP_STARTED_BIT){
+				if((uxBits & WIFI_MANAGER_AP_STARTED_BIT) && wifi_settings.sta_only){
 					TickType_t t = pdMS_TO_TICKS( WIFI_MANAGER_SHUTDOWN_AP_TIMER );
 
 					/* if for whatever reason user configured the shutdown timer to be less than 1 tick, the AP is stopped straight away */
