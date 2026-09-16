@@ -897,6 +897,10 @@ void wifi_manager( void * pvParameters ){
 	BaseType_t xStatus;
 	EventBits_t uxBits;
 	uint8_t	retries = 0;
+	/** @brief Manager-owned radio state; scans wait until association finishes. */
+	bool connection_in_progress = false;
+	/** @brief A new portal request waiting for the previous STA to disconnect. */
+	bool user_connect_pending = false;
 
 
 	/* initialize the tcp stack */
@@ -1022,7 +1026,7 @@ void wifi_manager( void * pvParameters ){
 
 				/* if a scan is already in progress this message is simply ignored thanks to the WIFI_MANAGER_SCAN_BIT uxBit */
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
-				if(! (uxBits & WIFI_MANAGER_SCAN_BIT) ){
+				if(!connection_in_progress && !user_connect_pending && !(uxBits & WIFI_MANAGER_SCAN_BIT)){
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
 					esp_err_t scan_err = esp_wifi_scan_start(&scan_config, false);
 					if (scan_err != ESP_OK) {
@@ -1067,13 +1071,32 @@ void wifi_manager( void * pvParameters ){
 
 			case WM_ORDER_CONNECT_STA:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
+				/* Automatic retries must not cancel a portal network scan or
+				 * interfere with an explicit connection request. */
+				uxBits = xEventGroupGetBits(wifi_manager_event_group);
+				if((BaseType_t)msg.param == CONNECTION_REQUEST_AUTO_RECONNECT &&
+				   (connection_in_progress || user_connect_pending ||
+				    (uxBits & (WIFI_MANAGER_SCAN_BIT | WIFI_MANAGER_REQUEST_STA_CONNECT_BIT)))){
+					xTimerReset(wifi_manager_retry_timer, 0);
+					break;
+				}
 
 				/* very important: precise that this connection attempt is specifically requested.
 				 * Param in that case is a boolean indicating if the request was made automatically
 				 * by the wifi_manager.
 				 * */
 				if((BaseType_t)msg.param == CONNECTION_REQUEST_USER) {
+					xTimerStop(wifi_manager_retry_timer, 0);
+					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
+					if(connection_in_progress || (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT)){
+						esp_err_t disconnect_err = esp_wifi_disconnect();
+						if(disconnect_err == ESP_OK){
+							user_connect_pending = true;
+							break;
+						}
+						ESP_LOGW(TAG, "Cannot stop previous STA attempt: %s", esp_err_to_name(disconnect_err));
+					}
 				}
 				else if((BaseType_t)msg.param == CONNECTION_REQUEST_RESTORE_CONNECTION) {
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
@@ -1081,15 +1104,33 @@ void wifi_manager( void * pvParameters ){
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if( ! (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) ){
-					/* update config to latest and attempt connection */
-					ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_manager_get_wifi_sta_config()));
-
 					/* if there is a wifi scan in progress abort it first
 					   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
 					if(uxBits & WIFI_MANAGER_SCAN_BIT){
 						esp_wifi_scan_stop();
 					}
-					ESP_ERROR_CHECK(esp_wifi_connect());
+					/* Network operations can fail while the remote radio is busy.
+					 * Keep the portal alive and retry the latest configuration. */
+					wifi_config_t next_config = *wifi_manager_get_wifi_sta_config();
+					/* Search all candidates, including repeaters sharing an SSID. */
+					next_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+					next_config.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+					next_config.sta.failure_retry_cnt = 2;
+					ESP_LOGI(TAG, "STA attempt ssid=%.*s scan=all retries=2 pmf_required=%d sae=%d",
+					         (int)sizeof(next_config.sta.ssid), next_config.sta.ssid,
+					         next_config.sta.pmf_cfg.required, next_config.sta.sae_pwe_h2e);
+					esp_err_t connect_err = esp_wifi_set_config(ESP_IF_WIFI_STA, &next_config);
+					if(connect_err == ESP_OK){
+						connect_err = esp_wifi_connect();
+					}
+					if(connect_err != ESP_OK){
+						ESP_LOGW(TAG, "STA connection request failed: %s; scheduling retry", esp_err_to_name(connect_err));
+						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
+						xTimerReset(wifi_manager_retry_timer, 0);
+					}
+					else{
+						connection_in_progress = true;
+					}
 				}
 
 				/* callback */
@@ -1100,6 +1141,14 @@ void wifi_manager( void * pvParameters ){
 			case WM_EVENT_STA_DISCONNECTED:
 				;wifi_event_sta_disconnected_t* wifi_event_sta_disconnected = (wifi_event_sta_disconnected_t*)msg.param;
 				ESP_LOGI(TAG, "MESSAGE: EVENT_STA_DISCONNECTED with Reason code: %d", wifi_event_sta_disconnected->reason);
+				connection_in_progress = false;
+				if(user_connect_pending){
+					user_connect_pending = false;
+					ESP_LOGI(TAG, "Previous STA disconnected; applying pending portal network");
+					wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER);
+					free(wifi_event_sta_disconnected);
+					break;
+				}
 
 				/* this even can be posted in numerous different conditions
 				 *
@@ -1288,6 +1337,7 @@ void wifi_manager( void * pvParameters ){
 				break;
 
 			case WM_EVENT_STA_GOT_IP:
+				connection_in_progress = false;
 				ESP_LOGI(TAG, "WM_EVENT_STA_GOT_IP");
 				ip_event_got_ip_t* ip_event_got_ip = (ip_event_got_ip_t*)msg.param; 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);

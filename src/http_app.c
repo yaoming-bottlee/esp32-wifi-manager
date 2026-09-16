@@ -427,6 +427,9 @@ void http_app_start(bool lru_purge_enable){
 		 * We could register all URLs one by one, but this would not work while the fake DNS is active */
 		config.uri_match_fn = httpd_uri_match_wildcard;
 		config.lru_purge_enable = lru_purge_enable;
+		/* Leave sockets for captive DNS, MQTT and other application services.
+		 * Purge idle portal clients before exhausting the global socket pool. */
+		config.max_open_sockets = 3;
 
 		/* generate the URLs */
 		if(http_root_url == NULL){
