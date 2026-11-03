@@ -227,9 +227,19 @@ typedef enum message_code_t {
 	WM_EVENT_SCAN_DONE = 11,
 	WM_EVENT_STA_GOT_IP = 12,
 	WM_ORDER_STOP_AP = 13,
-	WM_MESSAGE_CODE_COUNT = 14 /* important for the callback array */
+	WM_ORDER_SET_NETWORK = 14,
+	WM_MESSAGE_CODE_COUNT = 15 /* important for the callback array */
 
 }message_code_t;
+
+/** Queue a copied configuration; managed networks never overwrite legacy NVS. */
+esp_err_t wifi_manager_set_network(const wifi_config_t *config, bool managed, uint32_t *ticket);
+/** Last queued network actually passed to esp_wifi_connect. */
+uint32_t wifi_manager_network_applied(void);
+/** Install before wifi_manager_start. Hooks run on the manager task. */
+void wifi_manager_network_hooks(void (*load)(wifi_config_t *),
+                                void (*saved)(const wifi_config_t *),
+                                bool (*portal_allowed)(void));
 
 /**
  * @brief simplified reason codes for a lost connection.

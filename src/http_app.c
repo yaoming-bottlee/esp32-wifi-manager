@@ -166,19 +166,17 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 			httpd_req_get_hdr_value_str(req, "X-Custom-ssid", ssid, ssid_len+1);
 			httpd_req_get_hdr_value_str(req, "X-Custom-pwd", password, password_len+1);
 
-			wifi_config_t* config = wifi_manager_get_wifi_sta_config();
-			memset(config, 0x00, sizeof(wifi_config_t));
-			memcpy(config->sta.ssid, ssid, ssid_len);
-			memcpy(config->sta.password, password, password_len);
-			ESP_LOGI(TAG, "ssid: %s, password: %s", ssid, password);
-			ESP_LOGD(TAG, "http_server_post_handler: wifi_manager_connect_async() call");
-			wifi_manager_connect_async();
+            wifi_config_t config = {0};
+            memcpy(config.sta.ssid, ssid, ssid_len);
+            memcpy(config.sta.password, password, password_len);
+            esp_err_t connect_err = wifi_manager_set_network(&config, false, NULL);
+            memset(&config, 0, sizeof(config));
 
 			/* free memory */
 			free(ssid);
 			free(password);
 
-			httpd_resp_set_status(req, http_200_hdr);
+			httpd_resp_set_status(req, connect_err == ESP_OK ? http_200_hdr : "503 Service Unavailable");
 			httpd_resp_set_type(req, http_content_type_json);
 			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
 			httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);

@@ -62,8 +62,53 @@ Contains the freeRTOS task and all necessary support
 
 
 
+typedef struct { wifi_config_t config; bool managed; uint32_t ticket; } network_request_t;
+static portMUX_TYPE s_network_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_network_requested, s_network_applied, s_network_ticket;
+uint32_t wifi_manager_network_applied(void)
+{
+    portENTER_CRITICAL(&s_network_mux);
+    uint32_t ticket=s_network_applied;
+    portEXIT_CRITICAL(&s_network_mux);
+    return ticket;
+}
+static bool s_managed_network;
+static void (*s_network_load)(wifi_config_t *);
+static void (*s_network_saved)(const wifi_config_t *);
+static bool (*s_portal_allowed)(void);
+
+void wifi_manager_network_hooks(void (*load)(wifi_config_t *),
+                                void (*saved)(const wifi_config_t *),
+                                bool (*portal_allowed)(void))
+{
+    s_network_load = load;
+    s_network_saved = saved;
+    s_portal_allowed = portal_allowed;
+}
+
 /* objects used to manipulate the main queue of events */
 QueueHandle_t wifi_manager_queue;
+
+esp_err_t wifi_manager_set_network(const wifi_config_t *config, bool managed, uint32_t *ticket)
+{
+    if (!wifi_manager_queue || !config) return ESP_ERR_INVALID_STATE;
+    if (!managed && s_portal_allowed && !s_portal_allowed()) return ESP_ERR_INVALID_STATE;
+    network_request_t *request = calloc(1, sizeof(*request));
+    if (!request) return ESP_ERR_NO_MEM;
+    request->config = *config;
+    request->managed = managed;
+    portENTER_CRITICAL(&s_network_mux);
+    request->ticket = ++s_network_requested;
+    portEXIT_CRITICAL(&s_network_mux);
+    uint32_t assigned = request->ticket;
+    queue_message msg = {.code = WM_ORDER_SET_NETWORK, .param = request};
+    if (xQueueSend(wifi_manager_queue, &msg, pdMS_TO_TICKS(100)) != pdTRUE) {
+        free(request);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (ticket) *ticket = assigned;
+    return ESP_OK;
+}
 
 /* @brief software timer to wait between each connection retry.
  * There is no point hogging a hardware timer for a functionality like this which only needs to be 'accurate enough' */
@@ -259,7 +304,6 @@ esp_err_t wifi_manager_save_sta_config(){
 				return esp_err;
 			}
 			change = true;
-			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: password:%s",wifi_manager_config_sta->sta.password);
 		}
 
 		sz = sizeof(tmp_settings);
@@ -283,7 +327,6 @@ esp_err_t wifi_manager_save_sta_config(){
 			change = true;
 
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_ssid: %s",wifi_settings.ap_ssid);
-			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_pwd: %s",wifi_settings.ap_pwd);
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_channel: %i",wifi_settings.ap_channel);
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_hidden (1 = yes): %i",wifi_settings.ap_ssid_hidden);
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_bandwidth (1 = 20MHz, 2 = 40MHz): %i",wifi_settings.ap_bandwidth);
@@ -369,9 +412,8 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		nvs_sync_unlock();
 
 
-		ESP_LOGI(TAG, "wifi_manager_fetch_wifi_sta_config: ssid:%s password:%s",wifi_manager_config_sta->sta.ssid,wifi_manager_config_sta->sta.password);
+		ESP_LOGI(TAG, "Stored WiFi credentials loaded");
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_ssid:%s",wifi_settings.ap_ssid);
-		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_pwd:%s",wifi_settings.ap_pwd);
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_channel:%i",wifi_settings.ap_channel);
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_hidden (1 = yes):%i",wifi_settings.ap_ssid_hidden);
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_bandwidth (1 = 20MHz, 2 = 40MHz)%i",wifi_settings.ap_bandwidth);
@@ -1050,7 +1092,12 @@ void wifi_manager( void * pvParameters ){
 
 			case WM_ORDER_LOAD_AND_RESTORE_STA:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_LOAD_AND_RESTORE_STA");
-				if(wifi_manager_fetch_wifi_sta_config()){
+				(void)wifi_manager_fetch_wifi_sta_config();
+                if (s_network_load) {
+                    s_network_load(wifi_manager_config_sta);
+                    s_managed_network = true;
+                }
+                if(wifi_manager_config_sta->sta.ssid[0]){
 					ESP_LOGI(TAG, "Saved wifi found on startup. Will attempt to connect.");
 					wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_RESTORE_CONNECTION);
 				}
@@ -1069,6 +1116,20 @@ void wifi_manager( void * pvParameters ){
 
 				break;
 
+            case WM_ORDER_SET_NETWORK: {
+                network_request_t *request = msg.param;
+                if (!request->managed && s_portal_allowed && !s_portal_allowed()) {
+                    free(request);
+                    break;
+                }
+                *wifi_manager_config_sta = request->config;
+                s_managed_network = request->managed;
+                s_network_ticket = request->ticket;
+                memset(request, 0, sizeof(*request));
+                free(request);
+                msg.param = (void *)CONNECTION_REQUEST_USER;
+            }
+            /* fall through */
 			case WM_ORDER_CONNECT_STA:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
 				/* Automatic retries must not cancel a portal network scan or
@@ -1129,6 +1190,9 @@ void wifi_manager( void * pvParameters ){
 						xTimerReset(wifi_manager_retry_timer, 0);
 					}
 					else{
+                        portENTER_CRITICAL(&s_network_mux);
+                        s_network_applied=s_network_ticket;
+                        portEXIT_CRITICAL(&s_network_mux);
 						connection_in_progress = true;
 					}
 				}
@@ -1143,6 +1207,7 @@ void wifi_manager( void * pvParameters ){
 				ESP_LOGI(TAG, "MESSAGE: EVENT_STA_DISCONNECTED with Reason code: %d", wifi_event_sta_disconnected->reason);
 				connection_in_progress = false;
 				if(user_connect_pending){
+                    if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(msg.param);
 					user_connect_pending = false;
 					ESP_LOGI(TAG, "Previous STA disconnected; applying pending portal network");
 					wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER);
@@ -1216,6 +1281,7 @@ void wifi_manager( void * pvParameters ){
 					 * in case they typed a wrong password for instance. Here we simply clear the request bit and move on */
 					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
 
+                    if (s_managed_network) xTimerReset(wifi_manager_retry_timer, 0);
 					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
 						wifi_manager_generate_ip_info_json( UPDATE_FAILED_ATTEMPT );
 						wifi_manager_unlock_json_buffer();
@@ -1352,11 +1418,12 @@ void wifi_manager( void * pvParameters ){
 				if(uxBits & WIFI_MANAGER_REQUEST_RESTORE_STA_BIT){
 					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
 				}
-				else{
-					wifi_manager_save_sta_config();
-				}
+                else if (!s_managed_network) {
+                    wifi_manager_save_sta_config();
+                    if (s_network_saved) s_network_saved(wifi_manager_config_sta);
+                }
 
-				/* reset number of retries */
+                /* reset number of retries */
 				retries = 0;
 
 				/* refresh JSON with the new IP */
@@ -1395,7 +1462,13 @@ void wifi_manager( void * pvParameters ){
 
 				break;
 
-			case WM_ORDER_DISCONNECT_STA:
+            case WM_ORDER_DISCONNECT_STA:
+                if (s_portal_allowed && !s_portal_allowed()) break;
+                if (s_network_saved) {
+                    wifi_config_t empty = {0};
+                    s_network_saved(&empty);
+                }
+                s_managed_network = false;
 				ESP_LOGI(TAG, "MESSAGE: ORDER_DISCONNECT_STA");
 
 				/* precise this is coming from a user request */
