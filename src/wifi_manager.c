@@ -932,6 +932,36 @@ esp_netif_t* wifi_manager_get_esp_netif_sta(){
 	return esp_netif_sta;
 }
 
+/* ESP-hosted can acknowledge disconnect without an event during association.
+ * Bound that wait and verify radio state before applying the latest target. */
+static bool wifi_manager_disconnect_wait(bool *connecting, bool *pending,
+                                         TickType_t *requested_tick)
+{
+    if (!*pending) return false;
+    if ((TickType_t)(xTaskGetTickCount() - *requested_tick) < pdMS_TO_TICKS(2000)) {
+        xTimerReset(wifi_manager_retry_timer, 0);
+        return true;
+    }
+    wifi_ap_record_t ap;
+    esp_err_t status = esp_wifi_sta_get_ap_info(&ap);
+    if (status == ESP_OK) {
+        (void)esp_wifi_disconnect();
+        *requested_tick = xTaskGetTickCount();
+        xTimerReset(wifi_manager_retry_timer, 0);
+        return true;
+    }
+    if (status != ESP_ERR_WIFI_NOT_CONNECT) {
+        xTimerReset(wifi_manager_retry_timer, 0);
+        return true;
+    }
+    ESP_LOGW(TAG, "STA disconnect event missing; radio unassociated, applying latest network");
+    *pending = false;
+    *connecting = false;
+    xEventGroupClearBits(wifi_manager_event_group,
+        WIFI_MANAGER_WIFI_CONNECTED_BIT | WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
+    return false;
+}
+
 void wifi_manager( void * pvParameters ){
 
 
@@ -943,6 +973,7 @@ void wifi_manager( void * pvParameters ){
 	bool connection_in_progress = false;
 	/** @brief A new portal request waiting for the previous STA to disconnect. */
 	bool user_connect_pending = false;
+    TickType_t disconnect_requested_tick = 0;
 
 
 	/* initialize the tcp stack */
@@ -1131,7 +1162,9 @@ void wifi_manager( void * pvParameters ){
             }
             /* fall through */
 			case WM_ORDER_CONNECT_STA:
-				ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
+                ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
+                if (wifi_manager_disconnect_wait(&connection_in_progress,
+                        &user_connect_pending, &disconnect_requested_tick)) break;
 				/* Automatic retries must not cancel a portal network scan or
 				 * interfere with an explicit connection request. */
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
@@ -1153,7 +1186,9 @@ void wifi_manager( void * pvParameters ){
 					if(connection_in_progress || (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT)){
 						esp_err_t disconnect_err = esp_wifi_disconnect();
 						if(disconnect_err == ESP_OK){
-							user_connect_pending = true;
+                            user_connect_pending = true;
+                            disconnect_requested_tick = xTaskGetTickCount();
+                            xTimerReset(wifi_manager_retry_timer, 0);
 							break;
 						}
 						ESP_LOGW(TAG, "Cannot stop previous STA attempt: %s", esp_err_to_name(disconnect_err));
