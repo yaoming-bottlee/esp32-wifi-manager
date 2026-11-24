@@ -420,6 +420,9 @@ void http_app_start(bool lru_purge_enable){
 	if(httpd_handle == NULL){
 
 		httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+#if CONFIG_IDF_TARGET_ESP32P4
+        config.core_id = 1;
+#endif
 
 		/* this is an important option that isn't set up by default.
 		 * We could register all URLs one by one, but this would not work while the fake DNS is active */

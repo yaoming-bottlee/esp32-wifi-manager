@@ -1,3 +1,4 @@
+#include "app_task_affinity.h"
 /*
 Copyright (c) 2019 Tony Pottier
 
@@ -59,7 +60,7 @@ int socket_fd;
 
 void dns_server_start() {
 	if(task_dns_server == NULL){
-		xTaskCreate(&dns_server, "dns_server", 3072, NULL, WIFI_MANAGER_TASK_PRIORITY-1, &task_dns_server);
+		app_task_create_service(&dns_server, "dns_server", 3072, NULL, WIFI_MANAGER_TASK_PRIORITY-1, &task_dns_server);
 	}
 }
 
